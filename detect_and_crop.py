@@ -11,6 +11,7 @@ from object_detection.utils import visualization_utils as vis_util
 
 
 NUM_CLASSES = 1
+PROBABILITY_THRESHOLD = 0.6
 
 handler = logging.StreamHandler(sys.stdout)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -36,53 +37,52 @@ def load_graph(model_dir):
 def load_label_map(label_map_name, num_class):
     label_map = label_map_util.load_labelmap(label_map_name)
     categories = label_map_util.convert_label_map_to_categories(label_map,
-                                max_num_classes=num_class, use_display_name=True)
+                                                                max_num_classes=num_class, use_display_name=True)
     category_index = label_map_util.create_category_index(categories)
     return category_index
 
 
-def detect_object(detection_graph, sess, image, category_index, image_name, output_dir):
+def detect_object(detection_graph, sess, image, category_index, image_name, output_dir, draw_result=False):
     with detection_graph.as_default():
         with sess.as_default() as sess:
-            # Definite input and output Tensors for detection_graph
             image_tensor = detection_graph.get_tensor_by_name('image_tensor:0')
-            # Each box represents a part of the image where a particular object was detected.
             detection_boxes = detection_graph.get_tensor_by_name('detection_boxes:0')
-            # Each score represent how level of confidence for each of the objects.
-            # Score is shown on the result image, together with the class label.
             detection_scores = detection_graph.get_tensor_by_name('detection_scores:0')
             detection_classes = detection_graph.get_tensor_by_name('detection_classes:0')
             num_detections = detection_graph.get_tensor_by_name('num_detections:0')
-            #   image = Image.open(image_path)
-              # the array based representation of the image will be used later in order to prepare the
-              # result image with boxes and labels on it.
-            # image_np = load_image_into_numpy_array(image)
             image_np = image
-            # Expand dimensions since the model expects images to have shape: [1, None, None, 3]
             image_np_expanded = np.expand_dims(image_np, axis=0)
-            # Actual detection.
+
             (boxes, scores, classes, num) = sess.run(
               [detection_boxes, detection_scores, detection_classes, num_detections],
               feed_dict={image_tensor: image_np_expanded})
 
-            crop_target(image_np, np.squeeze(boxes), np.squeeze(scores), image_name, output_dir, score_min=0.6)
-            # Visualization of the results of a detection.
-            image_np = np.array(image_np)
-            vis_util.visualize_boxes_and_labels_on_image_array(
-              image_np,
-              np.squeeze(boxes),
-              np.squeeze(classes).astype(np.int32),
-              np.squeeze(scores),
-              category_index,
-              use_normalized_coordinates=True,
-              line_thickness=6,
-              min_score_thresh = 0.6)
-            return image_np
+            crop_target(image_np,
+                        np.squeeze(boxes),
+                        np.squeeze(scores),
+                        image_name, output_dir,
+                        score_min=PROBABILITY_THRESHOLD)
+
+            if draw_result:
+                image_np = np.array(image_np)
+                vis_util.visualize_boxes_and_labels_on_image_array(
+                    image_np,
+                    np.squeeze(boxes),
+                    np.squeeze(classes).astype(np.int32),
+                    np.squeeze(scores),
+                    category_index,
+                    use_normalized_coordinates=True,
+                    line_thickness=6,
+                    min_score_thresh=PROBABILITY_THRESHOLD)
+
+                save_path = os.path.join(output_dir, '{}_demo_output.jpg'.format(image_name))
+                PIL.Image.fromarray(image_np).save(save_path)
+                logger.debug('Successfully draw boxes on image: {}_demo_output.jpg'.format(image_name))
 
 
 def crop_target(image_np, boxes, scores, image_name, output_dir, score_min=0.6, crop_max=2, y_expend=6, x_expend=4):
     if boxes.shape[0] == 0 or scores is None or scores[0] < score_min:
-        logger.info('No target recognized in image {}'.format(image_name))
+        logger.info('No target recognized in image {}.jpg'.format(image_name))
 
     for i in range(min(crop_max, boxes.shape[0])):
         if scores[i] < score_min:
@@ -104,8 +104,10 @@ def image_list_gen(image_path):
     logger.info('Generate candidate images list...')
     res_list = list()
     for ind, im in enumerate(os.listdir(image_path)):
+        im = im.lower()
+        if '.jpg' not in im:
+            continue
         im_path = os.path.join(image_path, im)
-        #jpg = PIL.Image.open(im_path)
         res_list.append((ind, im[:-4], im_path))
         logger.debug('Put {} into image candidate list.'.format(im_path))
 
@@ -114,41 +116,42 @@ def image_list_gen(image_path):
 
 # a process to do the detection_graph
 
-def object_detection_worker(images, detection_graph, category_index, result_path):
+def object_detection_worker(images, detection_graph, category_index, result_path, if_demo=False):
     logger.info('Start to draw boxes on images.')
     config = tf.ConfigProto()
     sess = tf.Session(graph=detection_graph, config=config)
     for ind, image in enumerate(images):
         with PIL.Image.open(image[2]) as im_data:
-            res_image = detect_object(detection_graph, sess, im_data, category_index, image[1], result_path)
-            PIL.Image.fromarray(res_image)\
-                .save(os.path.join(result_path, '{1}_outfile_{0}.jpg'
-                                   .format(image[0], image[1])))
-            logger.debug('Successfully draw boxes on image: {}'.format(image[1]))
+            detect_object(detection_graph, sess, im_data, category_index,
+                          image[1], result_path, draw_result=if_demo)
+
 
 
 def parse():
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument('-m', '--model_dir', type=str, required=True,
-                        help="The model directory with .pb extention to use.")
+                            help="The model directory with .pb extention to use.")
     arg_parser.add_argument('-i', '--image_dir', type=str, required=True,
-                        help="The image directory where source images locate.")
+                            help="The image directory where source images locate.")
     arg_parser.add_argument('-o', '--output_dir', type=str, required=True,
-                        help="The output directory for result images.")
+                            help="The output directory for result images.")
+    arg_parser.add_argument('-d', '--demo_mode', action='store_true',
+                            help="Enable the demo mode, to draw boxes on targets in images.", required=False)
 
     args = arg_parser.parse_args()
     return args
 
 
 def main():
-    
     args = parse()
     image_list = image_list_gen(args.image_dir)
     detection_graph = load_graph(args.model_dir)
     category_index = load_label_map(label_map_name=os.path.join(args.model_dir, 'jmlake-predef-classes.pbtxt'), num_class=NUM_CLASSES)
-
-    object_detection_worker(image_list, detection_graph, category_index, args.output_dir)
-
+    if args.demo_mode:
+        demo = True
+    else:
+        demo = False
+    object_detection_worker(image_list, detection_graph, category_index, args.output_dir, if_demo=demo)
 
 
 if __name__ == "__main__":
